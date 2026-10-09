@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Telemetría - TP05</title>
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #f4f4f4;
+        }
+
+        .panel {
+            background: white;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        h2 {
+            margin-top: 0;
+            font-size: 1.2rem;
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 5px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: center;
+        }
+
+        .indicador-pata {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            background: #eee;
+            text-align: center;
+            line-height: 40px;
+            margin: 5px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>Monitor de Telemetría Unitree (Go2)</h1>
+
+    <button onclick="capturarMuestra()">Capturar Muestra</button>
+    <button onclick="exportarCSV()">Exportar CSV</button>
+    <span id="estado-conexion" style="color: green; margin-left: 10px;">Conectado</span>
+
+    <!-- Panel 1: Motores -->
+    <div class="panel">
+        <h2>1. Motores</h2>
+        <table id="tablaMotores">
+            <thead>
+                <tr>
+                    <th>Motor ID</th>
+                    <th>Temperatura</th>
+                    <th>Ángulo (°)</th>
+                    <th>Velocidad (rad/s)</th>
+                    <th>Torque (N m)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- Las filas se llenarán con JS -->
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Panel 2: IMU -->
+    <div class="panel">
+        <h2>2. IMU (Roll, Pitch, Yaw)</h2>
+        <p>Roll: <span id="roll">0</span>° | Pitch: <span id="pitch">0</span>° | Yaw: <span id="yaw">0</span>°</p>
+        <canvas id="graficoIMU" height="100"></canvas>
+    </div>
+
+    <!-- Panel 3: BMS (Batería) -->
+    <div class="panel">
+        <h2>3. BMS (Batería)</h2>
+        <p>Nivel de carga: <span id="soc">0</span>%</p>
+        <p>Corriente: <span id="corriente">0</span> mA</p>
+        <p>Temperatura: <span id="tempBateria">0</span> °C</p>
+        <div id="celdasBateria">Voltajes de celda: </div>
+    </div>
+
+    <!-- Panel 4: Fuerzas por pata -->
+    <div class="panel">
+        <h2>4. Fuerzas por pata (Contacto)</h2>
+        <div id="pataFR" class="indicador-pata">FR</div>
+        <div id="pataFL" class="indicador-pata">FL</div>
+        <div id="pataRR" class="indicador-pata">RR</div>
+        <div id="pataRL" class="indicador-pata">RL</div>
+    </div>
+
+    <script>
+        const API = 'http://10.100.87.141:8001';
+        const POLL_MS = 500;
+
+        // Variables para captura de datos
+        let ultimaTelemetria = null;
+        let muestrasGuardadas = [];
+
+        // --- Semáforo de temperatura ---
+        function colorTemp(t) {
+            if (t < 40) return '#4CAF50'; // verde
+            if (t < 60) return '#FFC107'; // amarillo
+            return '#F44336'; // rojo
+        }
+
+        // --- Actualizar panel de motores ---
+        function actualizarMotores(motores) {
+            const tbody = document.querySelector('#tablaMotores tbody');
+            tbody.innerHTML = ''; // Limpiamos la tabla antes de actualizarla
+
+            motores.forEach(m => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>Motor ${m.id}</td>
+                    <td style="background-color: ${colorTemp(m.temperatura)}; color: black; font-weight: bold;">
+                        ${m.temperatura} °C
+                    </td>
+                    <td>${m.angulo}</td>
+                    <td>${m.velocidad}</td>
+                    <td>${m.torque}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+        // --- Configuración inicial del Gráfico IMU con Chart.js ---
+        const ctx = document.getElementById('graficoIMU').getContext('2d');
+        const imuChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [], // Eje X (tiempo)
+                datasets: [
+                    { label: 'Roll', borderColor: 'red', data: [], borderWidth: 1, pointRadius: 0 },
+                    { label: 'Pitch', borderColor: 'green', data: [], borderWidth: 1, pointRadius: 0 },
+                    { label: 'Yaw', borderColor: 'blue', data: [], borderWidth: 1, pointRadius: 0 }
+                ]
+            },
+            options: { animation: false, responsive: true } // Sin animación para que no parpadee
+        });
+        let tick = 0; // Contador para el eje X
+
+        // --- Actualizar panel IMU ---
+        function actualizarIMU(imu) {
+            // Textos numéricos
+            document.getElementById('roll').textContent = imu.roll;
+            document.getElementById('pitch').textContent = imu.pitch;
+            document.getElementById('yaw').textContent = imu.yaw;
+
+            // Lógica del búfer circular de 300 muestras
+            imuChart.data.labels.push(tick++);
+            imuChart.data.datasets[0].data.push(imu.roll);
+            imuChart.data.datasets[1].data.push(imu.pitch);
+            imuChart.data.datasets[2].data.push(imu.yaw);
+
+            if (imuChart.data.labels.length > 300) {
+                imuChart.data.labels.shift();
+                imuChart.data.datasets.forEach(dataset => dataset.data.shift());
+            }
+            imuChart.update();
+        }
+
+        // --- Actualizar panel BMS ---
+        function actualizarBMS(bms) {
+            document.getElementById('soc').textContent = bms.soc;
+            document.getElementById('corriente').textContent = bms.corriente;
+            document.getElementById('tempBateria').textContent = bms.temperatura;
+
+            // Unimos el arreglo de celdas en un texto
+            document.getElementById('celdasBateria').textContent = 'Voltajes de celda: ' + bms.celdas.map(v => v + 'V').join(' | ');
+        }
+
+        // --- Actualizar panel Fuerzas ---
+        function actualizarFuerzas(fuerzas) {
+            const patas = ['FR', 'FL', 'RR', 'RL'];
+            patas.forEach(pata => {
+                const elemento = document.getElementById('pata' + pata);
+                // Si la pata está en contacto (valor 1), se pone verde, sino queda gris
+                elemento.style.background = fuerzas[pata] ? '#4CAF50' : '#eee';
+                elemento.style.color = fuerzas[pata] ? 'white' : 'black';
+            });
+        }
+
+        // --- Polling principal ---
+        async function poll() {
+            try {
+                const response = await fetch(`${API}/telemetria?modelo=go2`);
+                if (!response.ok) throw new Error("Error en red");
+
+                const data = await response.json();
+                ultimaTelemetria = data; // Guardamos el último dato recibido
+                document.getElementById('estado-conexion').textContent = 'Conectado';
+                document.getElementById('estado-conexion').style.color = 'green';
+
+                // Actualizamos los paneles
+                actualizarMotores(data.motores);
+
+                // Las siguientes funciones las iremos agregando
+                actualizarIMU(data.imu);
+                actualizarBMS(data.bms);
+                actualizarFuerzas(data.fuerzas);
+
+            } catch (error) {
+                document.getElementById('estado-conexion').textContent = 'Desconectado';
+                document.getElementById('estado-conexion').style.color = 'red';
+                console.error("Pérdida de conexión:", error);
+            }
+        }
+
+        // --- Capturar y Exportar CSV ---
+        function capturarMuestra() {
+            if (!ultimaTelemetria) {
+                alert("Aún no se han recibido datos para capturar.");
+                return;
+            }
+            // Agregamos la hora local de captura al objeto
+            const muestra = {
+                timestamp: new Date().toLocaleTimeString(),
+                ...ultimaTelemetria
+            };
+            muestrasGuardadas.push(muestra);
+            alert(`Muestra capturada. (Total: ${muestrasGuardadas.length})`);
+        }
+
+        function exportarCSV() {
+            if (muestrasGuardadas.length === 0) {
+                alert("No hay muestras capturadas para exportar.");
+                return;
+            }
+
+            // Construimos los encabezados del CSV (columnas planas)
+            let csv = "timestamp,imu_roll,imu_pitch,imu_yaw,bms_soc,bms_corriente,bms_temp,pata_fr,pata_fl,pata_rr,pata_rl\n";
+
+            // Llenamos las filas
+            muestrasGuardadas.forEach(m => {
+                const fila = [
+                    m.timestamp,
+                    m.imu ? m.imu.roll : 0,
+                    m.imu ? m.imu.pitch : 0,
+                    m.imu ? m.imu.yaw : 0,
+                    m.bms ? m.bms.soc : 0,
+                    m.bms ? m.bms.corriente : 0,
+                    m.bms ? m.bms.temperatura : 0,
+                    m.fuerzas ? m.fuerzas.FR : 0,
+                    m.fuerzas ? m.fuerzas.FL : 0,
+                    m.fuerzas ? m.fuerzas.RR : 0,
+                    m.fuerzas ? m.fuerzas.RL : 0
+                ];
+                csv += fila.join(",") + "\n";
+            });
+
+            // Usamos Blob API para descargar el archivo sin pasar por servidor
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+
+            const link = document.createElement("a");
+            link.href = url;
+            link.setAttribute("download", "telemetria.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }
+
+        // Iniciar el polling
+        setInterval(poll, POLL_MS);
+        poll();
+    </script>
+</body>
+
+</html>
